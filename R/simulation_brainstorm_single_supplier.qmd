@@ -1,0 +1,108 @@
+---
+title: "542 simulation brainstorming"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+```
+
+# Simple case to start out
+
+Start assuming the follow factors are NOT in play
+
+-   time
+
+-   climate
+
+-   season
+
+-   harvesting procedures
+
+-   national trends
+
+# Simulate data coming from 1 supplier
+
+A data generating model with random effects for Train and Rail Car
+
+$$
+Y_{ij} = \mu  +A_i + E_{ij}
+$$
+
+Where $Y_{ij}$ denotes the aflatoxin level in (log10-ppb units) for the ith train and the jth railcar.
+
+$$
+i=1,2,... \text{  = index of the train}
+$$
+
+$$
+j=1,2,...r_i \text{ = index of railcar in the } i\text{th train}
+$$
+
+$$
+A_i \text{ ~ iid } N(0, \sigma^2_A) \text{ = random effect due to ith train}
+$$
+
+$$ E_{ij} \text{ ~ iid } N(0, \sigma^2_E) \text{ = random effect due to jth rail car} $$
+
+Also assume all $A_i$ and $E_{ij}$ are independent.
+
+```{r}
+# Population parameters
+mean_aflatoxin <- log10(30) # Say the mean aflatoxin level is high, e.g., 30 ppb (transformed to log10 units)
+train_effect_sd <- log10(10) # in units of log10-ppb aflatoxin
+railcar_effect_sd <- log10(2) # in units of log10-ppb aflatoxin
+
+# Number of trains/railcars to simulate
+nrailcars_per_train <- 200
+ntrains <- 3
+
+set.seed(393)
+
+# Generate table of Random train effects
+train_effect <- data.frame(train_id = 1:ntrains,
+                           train_effect = rnorm(n = ntrains, 
+                                                mean = 0, 
+                                                sd = train_effect_sd))
+
+train_effect
+
+# Generate table of random rail car effects
+railcar_effect <- data.frame(train_id = rep(1:ntrains, each = nrailcars_per_train),
+                             railcar_id = rep(1:nrailcars_per_train, times = ntrains),
+                             railcar_effect = rnorm(n = ntrains*nrailcars_per_train,
+                                                    mean = 0, 
+                                                    sd = railcar_effect_sd))
+
+# Merge tables
+dat <- merge(train_effect, railcar_effect, by = "train_id", all = TRUE)
+
+# Calculate the aflatoxin level in the jth rail car from the ith train
+dat <- dat %>% 
+  mutate(y = mean_aflatoxin + train_effect + railcar_effect)
+
+# Make some variables factors
+dat <- dat %>% 
+  mutate(train_id = as.factor(train_id))
+
+
+head(dat)
+
+```
+
+# Visualization
+
+```{r}
+# All together
+ggplot(dat, aes(x = y))+
+  geom_histogram(aes(fill = train_id))+
+  xlab("aflatoxin level in jth railcar (log10-ppb units)")
+
+# Separate by train ID
+ggplot(dat, aes(x = y))+
+  geom_histogram(aes(fill = train_id))+
+  facet_wrap(vars(train_id), ncol = 1)+
+  xlab("aflatoxin level in jth railcar (log10-ppb units)")
+```
