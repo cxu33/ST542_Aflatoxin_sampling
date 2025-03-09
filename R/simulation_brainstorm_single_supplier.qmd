@@ -7,6 +7,7 @@ editor: visual
 ```{r}
 library(tidyverse)
 library(ggplot2)
+library(lme4)
 ```
 
 # Simple case to start out
@@ -105,4 +106,201 @@ ggplot(dat, aes(x = y))+
   geom_histogram(aes(fill = train_id))+
   facet_wrap(vars(train_id), ncol = 1)+
   xlab("aflatoxin level in jth railcar (log10-ppb units)")
+```
+
+# **Model fitting**
+
+```{r}
+model1 <- lmer(y ~ 1 + (1 | train_id), data = dat)
+summary(model1)
+```
+
+# **Extend the Simulation to Multiple Suppliers**
+
+```{r}
+# Population parameters
+supplier_effect_sd <- 1.5           # SD for supplier effect 
+
+# Simulation parameters
+n_suppliers <- 10                   # number of suppliers
+
+# Define threshold in log10 units for 20 ppb
+threshold_log10 <- log10(20)
+
+# Function to simulate one supplier's data including supplier effect
+simulate_supplier <- function(supplier_id) {
+  # Supplier random effect
+  supplier_effect <- rnorm(1, mean = 0, sd = supplier_effect_sd)
+  
+  # Simulate train effects for this supplier
+  train_effect <- data.frame(
+    train_id = 1:ntrains,
+    supplier_id = supplier_id,
+    train_effect = rnorm(n = ntrains, mean = 0, sd = train_effect_sd)
+  )
+  
+  # Simulate railcar effects for each train
+  railcar_effect <- data.frame(
+    train_id = rep(1:ntrains, each = nrailcars_per_train),
+    supplier_id = supplier_id,
+    railcar_id = rep(1:nrailcars_per_train, times = ntrains),
+    railcar_effect = rnorm(n = ntrains * nrailcars_per_train, mean = 0, sd = railcar_effect_sd)
+  )
+  
+  # Merge tables and calculate y values (log10-ppb)
+  dat_supplier <- merge(train_effect, railcar_effect, by = c("supplier_id", "train_id"))
+  dat_supplier <- dat_supplier %>% 
+    mutate(y = mean_aflatoxin + supplier_effect + train_effect + railcar_effect,
+           ppb = 10^y)  # Convert back to ppb
+  
+  return(dat_supplier)
+}
+
+# Create a data frame to store supplier vetting results
+supplier_results <- data.frame(supplier_id = 1:n_suppliers, rejected = NA)
+
+# Loop over each supplier, simulate their data, and apply the decision rule
+for (i in 1:n_suppliers) {
+  dat_supplier <- simulate_supplier(i)
+  
+  # Decision rule: reject if any sample exceeds 20 ppb.
+  rejected <- any(dat_supplier$ppb > 20)
+  
+  supplier_results$rejected[i] <- rejected
+}
+
+# View the results: which suppliers are rejected?
+print(supplier_results)
+```
+
+# Research question 1
+
+If we get a trainload from a new supplier, how many railcars need to be sampled in order to be reasonably confident that the whole trainload is safe?
+
+Preliminary approach:
+
+```{r}
+# define threshold
+threshold <- 20 
+
+# Function to simulate one trainload (ignoring supplier effects for a single train)
+simulate_trainload <- function() {
+  # Simulate one train's train effect
+  train_effect <- rnorm(1, mean = 0, sd = train_effect_sd)
+  # Simulate railcar effects for this train
+  railcar_effect <- rnorm(nrailcars_per_train, mean = 0, sd = railcar_effect_sd)
+  # Calculate the log10 aflatoxin levels
+  y <- mean_aflatoxin + train_effect + railcar_effect
+  # Convert to ppb
+  ppb <- 10^y
+  return(ppb)
+}
+
+# Set simulation parameters
+n_sim <- 1000
+candidate_sample_sizes <- seq(5, nrailcars_per_train, by = 5)
+false_negative_rate <- numeric(length(candidate_sample_sizes))
+
+# Loop over candidate sample sizes
+for (i in seq_along(candidate_sample_sizes)) {
+  n_sample <- candidate_sample_sizes[i]
+  false_negatives <- 0
+  total_unsafe_trainloads <- 0
+  for (j in 1:n_sim) {
+    ppb <- simulate_trainload()
+    full_safe <- all(ppb < threshold)  # True if the entire trainload is safe
+    # Sample n railcars randomly from the trainload
+    sample_ppb <- sample(ppb, n_sample)
+    sample_safe <- all(sample_ppb < threshold)
+    
+    # If the full trainload is unsafe but the sample is safe, it's a false negative
+    if (!full_safe) {
+      total_unsafe_trainloads <- total_unsafe_trainloads + 1
+      if (sample_safe) {
+        false_negatives <- false_negatives + 1
+      }
+    }
+  }
+  # Calculate false negative rate for this sample size
+  false_negative_rate[i] <- ifelse(total_unsafe_trainloads > 0,
+                                   false_negatives / total_unsafe_trainloads,
+                                   0)
+}
+
+results <- data.frame(n_sample = candidate_sample_sizes,
+                      false_negative_rate = false_negative_rate)
+print(results)
+```
+
+Method 1: Model the number of safe cars in subsample as coming from a Hypergeometric distribution. Create 95% confidence intervals for plausible values for the number of safe rail cars in trainload.
+
+The **hypergeometric distribution** describes the probability of k successes (random draws for which the object drawn has a specified feature) in n draws, *without* replacement, from a finite [population](https://en.wikipedia.org/wiki/Statistical_population "Statistical population") of size N that contains exactly K objects, wherein each draw is either a success or a failure.
+
+```{r}
+N <- 200      # total railcars in the train
+n <- 30       # number of rail cars sampled
+alpha <- 0.05 # significance level
+
+# Function to compute the hypergeometric probability of observing n safe railcars given S railcars are safe in the train. (S safe railcars out of N railcars in total)
+prob_all_safe <- function(S, n, N) {
+  dhyper(x = n, m = S, n = N - S, k = n)
+}
+
+# Find the smallest S (>= n) for which the probability is at least alpha/2 (for the lower tail)
+possible_S <- n:N
+probs <- sapply(possible_S, prob_all_safe, n = n, N = N)
+
+# The lower bound S_low is the smallest S for which the probability exceeds our cutoff.
+S_low <- possible_S[min(which(probs >= alpha/2))]
+
+cat("For a sample of", n, "railcars (all safe), the 95% CI for the total number of safe railcars is approximately [",
+    S_low, ",", N, "].\n")
+```
+
+Method 2: Leverage the Normality of the aflatoxin levels to get a tighter estimate of the number of safe rail cars in the train?
+
+The aflatoxin levels in log‐scale are approximately Normal.
+
+$$
+Y \sim (\mu, \sigma^2)
+$$
+
+Define T as the threshold: $T = log_{10}(20)$;
+
+The probability a railcar is safe is: $p=P(Y<T)=\Phi(\frac{T-\mu}{\sigma})$;
+
+The number of safe railcars X in a train with N railcars can be modeled with a Binomial distribution:
+
+$$
+X \sim B(N,p)
+$$
+
+Hence, the 95% CI is $np\pm1.96\sqrt{np(1-p)}$
+
+```{r}
+# Parameters (example values)
+mu <- log10(30)      # Overall mean of aflatoxin level
+sigma_train <- log10(10)    # SD for train effect 
+sigma_railcar <- log10(2)   # SD for railcar effect 
+
+# Combined standard deviation (if effects add in quadrature)
+sigma <- sqrt(sigma_train^2 + sigma_railcar^2)
+
+# Safety threshold in log10 units
+T <- log10(20)
+
+# Probability a single railcar is safe
+p <- pnorm(T, mean = mu, sd = sigma)
+
+# Number of railcars in the train
+N <- 200
+
+# Expected number of safe railcars
+expected_safe <- N * p
+
+# Using normal approximation to the binomial for 95% CI
+se <- sqrt(N * p * (1 - p))
+CI_lower <- expected_safe - 1.96 * se
+CI_upper <- expected_safe + 1.96 * se
+cat("95% CI for the number of safe railcars: [", round(CI_lower), ",", round(CI_upper), "]\n")
 ```
