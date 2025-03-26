@@ -1,0 +1,120 @@
+---
+title: "Exploring Appropriate Models for Aflatoxin Values"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+date: "2025-03-25"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(readxl)
+library(MASS)
+library(ggplot2)
+```
+
+# Prepare data
+
+```{r}
+dat <- read_xlsx("data/Aflatoxin Testing Results 2024-2025_MHC.xlsx")
+
+# Clean column names
+dat <- dat %>% 
+  rename(Date = `Sample Date`, ticket_num = `Ticket #`, aflatoxin_ppb = `Aflatoxins, ppb`)
+```
+
+# Histogram of full data
+
+
+```{r}
+ggplot(dat, aes(x = aflatoxin_ppb)) +
+  geom_histogram(aes(y = after_stat(density)))
+```
+
+It appears that there are a lot of 0s! The remaining non-zero values follow some sort of right-skewed distribution.
+
+# The "hurdle" model
+
+General formula (I think)
+
+Let $f_{y!=0}$ by a valid pdf that does not include $y=0$. 
+
+Then,
+
+$$
+Pr(Y=y) =
+\begin{cases}
+p & y = 0 \\
+(1-p)f_{y!=0}(y) & y > 0
+\end{cases}
+$$
+
+
+# LogNormal model (for positive values)
+
+Extract positive values
+
+```{r}
+dat_pos <- dat %>% 
+  filter(aflatoxin_ppb > 0)
+```
+
+
+```{r}
+# fit the model
+fit.lognormal <- fitdistr(dat_pos$aflatoxin_ppb, densfun = "lognormal")
+fit.lognormal
+
+# Create table with probability density values for lognormal distribution 
+# with parameters from fit.lognormal
+xvals <- seq(1e-4, 25, by = 0.1)
+lnrom_vals <- dlnorm(x = xvals, 
+                     meanlog = fit.lognormal$estimate[1],
+       sdlog = fit.lognormal$estimate[2])
+lognormal.tb <- data.frame(x = xvals, prob_density = lnrom_vals)
+
+# Plot it!
+ggplot(dat_pos, aes(x = aflatoxin_ppb)) +
+  geom_histogram(aes(y = after_stat(density)))+
+  geom_line(data = lognormal.tb, aes(x = x, y = prob_density), col = "cornflowerblue", linewidth = 1.5)+
+  ggtitle("Fit of LogNormal model\n(on positive values only)")
+# summary(fit.lognormal)
+
+AIC(fit.lognormal)
+
+```
+
+# Gamma model (for positive values)
+
+```{r}
+fit.gamma <- fitdistr(dat_pos$aflatoxin_ppb, densfun = "gamma")
+fit.gamma
+
+# Create table with probability density values for gamma distribution 
+# with parameters from fit.gamma
+gamma_vals <- dgamma(x = xvals, 
+        shape = fit.gamma$estimate[1],
+       rate = fit.gamma$estimate[2])
+gamma.tb <- data.frame(x = xvals, prob_density = gamma_vals)
+
+# Plot it!
+ggplot(dat_pos, aes(x = aflatoxin_ppb)) +
+  geom_histogram(aes(y = after_stat(density)))+
+  geom_line(data = gamma.tb, aes(x = x, y = prob_density), col = "cornflowerblue", linewidth = 1.5)+
+  ggtitle("Fit of Gamma model\n(on positive values only)")
+#summary(fit.gamma)
+
+AIC(fit.gamma) # 749.329
+```
+
+
+Gamma models appears to have a slightly better fit both visually and based on the AIC (AIC for Gamma model =749, AIC for LogNormal = 777).
+
+There are other right-skewed distributions that we could try as well!
