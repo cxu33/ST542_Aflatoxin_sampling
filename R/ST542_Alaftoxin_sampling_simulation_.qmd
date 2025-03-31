@@ -238,6 +238,9 @@ candidate_sample_sizes <- seq(5, nrailcars_per_train, by = 5)
 false_negative_rate <- numeric(length(candidate_sample_sizes))
 total_unsafe <- numeric(length(candidate_sample_sizes))
 
+# Initialize simulation table
+sim.tb <- data.frame()
+
 # Progress bar setup
 pb <- txtProgressBar(min = 0, max = length(candidate_sample_sizes), style = 3)
 
@@ -254,13 +257,24 @@ for (i in seq_along(candidate_sample_sizes)) {
     true_train_safe <- mean(ppb < regulatory_threshold)
     full_safe <- (true_train_safe >= target_safe_proportion)
     
+    # Draw a random sample of n_sample railcars
+    sample_ppb <- sample(ppb, n_sample)
+    sample_lower_bound <- ci_lower_bound(sample_ppb, N = nrailcars_per_train)
+    sample_safe <- (sample_lower_bound >= target_safe_proportion)
+    
+    # Add info on this simulation
+    add.tb <- data.frame(sample_size = n_sample,
+                         repid = j,
+                         train_true_safe_prop = true_train_safe,
+                         train_true_safe_label = full_safe,
+                         sample_prop_below_thres = mean(sample_ppb < sample_threshold),
+                         sample_lower_bound = sample_lower_bound,
+                         train_accepted = sample_safe)
+    sim.tb <- rbind(sim.tb, add.tb)
+    
+    
     if (!full_safe) {
       total_unsafe_trainloads <- total_unsafe_trainloads + 1
-      
-      # Draw a random sample of n_sample railcars
-      sample_ppb <- sample(ppb, n_sample)
-      sample_lower_bound <- ci_lower_bound(sample_ppb, N = nrailcars_per_train)
-      sample_safe <- (sample_lower_bound >= target_safe_proportion)
       
       # Count false negatives
       if (sample_safe) {
@@ -270,8 +284,8 @@ for (i in seq_along(candidate_sample_sizes)) {
   }
   
   false_negative_rate[i] <- ifelse(total_unsafe_trainloads > 0,
-                                  false_negatives / total_unsafe_trainloads,
-                                  NA)
+                                   false_negatives / total_unsafe_trainloads,
+                                   NA)
   total_unsafe[i] <- total_unsafe_trainloads
   
   setTxtProgressBar(pb, i)  # Update progress bar
@@ -284,6 +298,28 @@ results <- data.frame(
   false_negative_rate = false_negative_rate,
   total_unsafe = total_unsafe
 )
+
+# Summarize sim.tb results
+sim.tb %>% 
+  group_by(sample_size) %>% 
+  reframe(type1_error_rate = sum(train_accepted & !train_true_safe_label)/n())
+
+summary.tb <- sim.tb %>% 
+  group_by(sample_size) %>% 
+  reframe(num_safe_trains_accepted = sum(train_true_safe_label & train_accepted),
+          num_safe_trains_rejected = sum(train_true_safe_label & !train_accepted),
+          num_unsafe_trains_accepted = sum(!train_true_safe_label & train_accepted),
+          sum_unsafe_trains_rejected = sum(!train_true_safe_label & !train_accepted),
+          num_safe_trains = sum(train_true_safe_label),
+          num_unsafe_trains = sum(!train_true_safe_label),
+          total = n()
+          )
+
+summary.tb <- summary.tb %>% 
+  mutate(type1_error_rate = num_unsafe_trains_accepted / num_unsafe_trains,
+          power = num_safe_trains_accepted / num_safe_trains)
+summary.tb
+
 
 # Plot the results
 ggplot(results, aes(x = n_sample, y = false_negative_rate)) +
@@ -308,6 +344,31 @@ ggplot(results, aes(x = n_sample, y = false_negative_rate)) +
 # Print summary of results
 print(results)
 
+
+# Plot results along with power curve
+library(tidyverse)
+plotdat <- summary.tb %>% 
+  pivot_longer(c(type1_error_rate, power), names_to = "measure", values_to = "rate")
+
+ggplot(plotdat, aes(x = sample_size, y = rate, color = measure)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 2) +
+  labs(
+    title = "Type 1 Error rate & Power vs. Sample Size",
+    subtitle = paste("Based on", n_sim, "simulations per sample size"),
+    x = "Sample Size (number of railcars tested)",
+    y = "rate"
+  ) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, nrailcars_per_train, by = 20)) +
+  theme_minimal() +
+  theme(
+    text = element_text(size = 20),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank()
+  )
 ```
 
 Method 1: Model the number of safe cars in subsample as coming from a Hypergeometric distribution. Create 95% confidence intervals for plausible values for the number of safe rail cars in trainload.
@@ -381,4 +442,142 @@ se <- sqrt(N * p * (1 - p))
 CI_lower <- expected_safe - 1.96 * se
 CI_upper <- expected_safe + 1.96 * se
 cat("95% CI for the number of safe railcars: [", round(CI_lower), ",", round(CI_upper), "]\n")
+```
+
+# Version 2 of Pre
+
+Noteworthy tweaks:
+
+-   Parameters for gamma distribution based on the fitted values calculated in 'model_fit_for_real_data_exploration.RMD'
+
+-   Simulated data based on a hurdle model, where:
+
+    $$
+    Pr(Y=y) =\begin{cases}
+    p & \text{ if } y=0\\
+    (1-p)*f_{gamma}(y)& \text{ if } y >0
+    \end{cases}
+    $$
+
+-   Increased `target_safe_proportion` from 0.95 to 1. (that is, we want to only accept a trainload if we think 100% of the samples are safe). (Actually, keeping 0.95 for now)
+
+```{r}
+# Parameters
+nrailcars_per_train <- 200
+prob_of_zero <- 0.2 # Based on real data, a value of 0.2 would be reasonable. Using a smaller value here to simulate an less safe supplier
+shape_param <- 1.4   # for the gamma distribution (controls skewness)
+scale_param <- 1/0.4218    # for the gamma distribution (controls mean)
+
+
+# Define thresholds
+regulatory_threshold <- 20  # ppb threshold for safety
+sample_threshold <- 10      # threshold used in sampling
+
+# Define the desired safety proportion for the full trainload (95%)
+target_safe_proportion <- 0.95
+
+# Function to simulate one trainload
+simulate_trainload <- function() {
+  
+  # Step one: determine if the value is 0 or not
+  # (returns list of 0s and 1s)
+  value_is_nonzero_indicator <- rbinom(n = nrailcars_per_train, 
+                                       size = 1,
+                                       p = 1-prob_of_zero)
+  
+  # Step two: draw from gamma dist
+  gamma_component <- rgamma(nrailcars_per_train, 
+                            shape = shape_param, 
+                            scale = scale_param)  
+  
+  # Step three: Multiply together to get a single vector
+  observed <- value_is_nonzero_indicator*gamma_component
+  
+  return(observed)
+}
+
+# Function to compute the lower bound of a 95% CI for the proportion (99% ci reduces FNR but requires larger sample size)
+ci_lower_bound <- function(x, N, conf = 0.95) {
+  n <- length(x)
+  p_hat <- mean(x < sample_threshold)
+  if(n == N) return(p_hat)  # No uncertainty if we sample everything
+  
+  fpc <- (N - n) / (N - 1)
+  se <- sqrt(p_hat * (1 - p_hat) / n * fpc)
+  z <- qnorm((1 + conf) / 2)
+  lower <- p_hat - z * se
+  return(max(0, lower))  # Ensure lower bound doesn't go below 0
+}
+
+# Simulation settings
+n_sim <- 100  # Number of simulations per sample size
+candidate_sample_sizes <- seq(5, nrailcars_per_train, by = 5)
+
+# Progress bar setup
+pb <- txtProgressBar(min = 0, max = length(candidate_sample_sizes), style = 3)
+
+# Initialize table to save output at each simulation
+sim.tb <- data.frame()
+
+# Loop over candidate sample sizes
+for (i in seq_along(candidate_sample_sizes)) {
+  n_sample <- candidate_sample_sizes[i]
+  false_negatives <- 0
+  total_unsafe_trainloads <- 0
+  
+  for (j in 1:n_sim) {
+    ppb <- simulate_trainload()
+    
+    # True safe proportion in the full trainload
+    true_train_safe <- mean(ppb < regulatory_threshold)
+    full_safe <- (true_train_safe >= target_safe_proportion)
+    
+    # Draw a random sample of n_sample railcars
+    sample_ppb <- sample(ppb, n_sample)
+    sample_lower_bound <- ci_lower_bound(sample_ppb, N = nrailcars_per_train)
+    sample_safe <- (sample_lower_bound >= target_safe_proportion)
+    
+    add.tb <- data.frame(sample_size = n_sample,
+                         repid = j,
+                         train_true_safe_prop = true_train_safe,
+                         train_true_safe_label = full_safe,
+                         sample_prop_below_thres = mean(sample_ppb < sample_threshold),
+                         sample_lower_bound = sample_lower_bound,
+                         train_accepted = sample_safe)
+    sim.tb <- rbind(sim.tb, add.tb)
+    
+    
+  }
+  
+  setTxtProgressBar(pb, i)  # Update progress bar
+}
+close(pb)
+
+# Calculate summaries at each sample size
+sim.tb %>% 
+  group_by(sample_size) %>% 
+  reframe(num_type1_error_rate = sum(train_accepted))
+
+# Plot the results
+ggplot(results, aes(x = n_sample, y = false_negative_rate)) +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = "False Negative Rate vs. Sample Size",
+    subtitle = paste("Based on", n_sim, "simulations per sample size"),
+    x = "Sample Size (number of railcars tested)",
+    y = "False Negative Rate (proportion)"
+  ) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, nrailcars_per_train, by = 20)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank()
+  )
+
+# Print summary of results
+print(results)
 ```
