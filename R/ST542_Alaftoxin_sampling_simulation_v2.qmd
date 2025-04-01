@@ -1,0 +1,730 @@
+---
+title: "542 simulation brainstorming"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(lme4)
+library(MASS)
+```
+
+# Notes
+
+Noteworthy tweaks from previous sampling simulation:
+
+-   Simulated data for that railcars in each trainload are based on a hurdle model, where:
+
+    $$
+    Pr(Y=y) =\begin{cases}
+    p & \text{ if } y=0\\
+    (1-p)*f_{gamma}(y)& \text{ if } y >0
+    \end{cases}
+    $$
+
+-   Parameters for gamma distribution based on the fitted values calculated in 'model_fit_for_real_data_exploration.RMD' (actually, a range of values around the fitted values)
+
+-   Rejection vs acceptance of the train is based on the sample mean (rather than the lower bound of the confidence interval for the proportion below the `sample_threshold`).
+
+-   A trainload is deemed as safe based on one of the following criteria (not sure which is beter):
+
+    -   100% of the railcars have ppb \< 20% (rather than 95%), or
+
+    -   the average of all railcars in the train have \< 20 ppb
+
+# Define functions for simulation
+
+```{r}
+# Function to simulate one trainload
+simulate_trainload <- function(nrailcars_per_train, 
+                               prob_of_zero,
+                               shape_param, scale_param) {
+  
+  # Step one: determine if the value is 0 or not
+  # (returns list of 0s and 1s)
+  value_is_nonzero_indicator <- rbinom(n = nrailcars_per_train, 
+                                       size = 1,
+                                       p = 1-prob_of_zero)
+  
+  # Step two: draw from gamma dist
+  gamma_component <- rgamma(nrailcars_per_train, 
+                            shape = shape_param, 
+                            scale = scale_param)  
+  
+  # Step three: Multiply together to get a single vector
+  observed <- value_is_nonzero_indicator*gamma_component
+  
+  return(observed)
+}
+
+run_simulation <- function(n_sim, 
+                           nrailcars_per_train, 
+                           prob_of_zero,
+                           shape_param, 
+                           scale_param) {
+  
+  # Define some quantities
+  candidate_sample_sizes <- seq(5, nrailcars_per_train, by = 5)
+  regulatory_threshold <- 20
+  
+  # Progress bar setup
+  pb <- txtProgressBar(min = 0, max = length(candidate_sample_sizes), style = 3)
+  
+  # Initialize table to save output at each simulation
+  sim.tb <- data.frame()
+  
+  # Loop over candidate sample sizes
+  for (i in seq_along(candidate_sample_sizes)) {
+    n_sample <- candidate_sample_sizes[i]
+    
+    for (j in 1:n_sim) {
+      ppb <- simulate_trainload(nrailcars_per_train, 
+                                prob_of_zero,
+                                shape_param, scale_param)
+      
+      # True safe proportion in the full trainload
+      train_true_safe_prop <- mean(ppb < regulatory_threshold)
+      train_true_avg <- mean(ppb)
+      
+      # Draw a random sample of n_sample railcars
+      sample_ppb <- sample(ppb, n_sample)
+      sample_avg <- mean(sample_ppb)
+      sample_avg_logs <- mean(log10(sample_ppb))
+      
+      # Save information on the simulation
+      add.tb <- data.frame(sample_size = n_sample,
+                           repid = j,
+                           train_true_safe_prop = train_true_safe_prop,
+                           train_true_avg = train_true_avg,
+                           sample_avg = sample_avg,
+                           sample_avg_logs = sample_avg_logs)
+      sim.tb <- rbind(sim.tb, add.tb)
+      
+      
+    }
+    
+    setTxtProgressBar(pb, i)  # Update progress bar
+  }
+  close(pb)
+  return(sim.tb)
+}
+
+```
+
+# Run intial simulation with real-data fit parameters
+
+```{r}
+# Parameters
+nrailcars_per_train <- 200
+prob_of_zero <- 0.2 # Based on real data, a value of 0.2 would be reasonable.
+shape_param <- 1.4   # for the gamma distribution (controls skewness)
+scale_param <- 1/0.4218    # for the gamma distribution (controls mean)
+
+# Simulation settings
+n_sim <- 1000  # Number of simulations per sample size
+
+sim.tb <- run_simulation(n_sim,
+               nrailcars_per_train, 
+                           prob_of_zero,
+                           shape_param, 
+                           scale_param)
+
+save(sim.tb, file = "sim_data/simulation_param_based_on_real_data_March31_2025.RData")
+
+```
+
+Find an optimal rejection threshold...
+
+```{r}
+sim.tb <- sim.tb %>% 
+
+  mutate(train_safety_by_prop = as.factor(ifelse(train_true_safe_prop == 1, "100% < 20 ppb", "some >= 20ppb")))
+
+sim.tb$sample_size_fct <- factor(sim.tb$sample_size, levels = sort(unique(sim.tb$sample_size)), ordered = T)
+
+ggplot(sim.tb[sim.tb$sample_size <= 50,], aes(x = sample_size_fct, y = sample_avg, color = train_safety_by_prop))+
+
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0), pch = 1, alpha = 0.5)+
+
+  geom_boxplot(fill = "transparent", outlier.shape = NA)+
+
+  theme_bw()
+
+ggsave(filename = "figs/sample_avg_vs_sample_size_grouped_by_train_total_safe.png",width = 7, height = 5)
+
+```
+
+```{r}
+
+sim.tb <- sim.tb %>% 
+  mutate(train_safety_by_prop = as.factor(ifelse(train_true_safe_prop == 1, "100% < 20 ppb", "some >= 20ppb")))
+
+sim.tb$sample_size_fct <- factor(sim.tb$sample_size, levels = sort(unique(sim.tb$sample_size)), ordered = T)
+
+ggplot(sim.tb[sim.tb$sample_size <= 50,], aes(x = sample_size_fct, y = sample_avg, color = train_safety_by_prop))+
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0), pch = 1, alpha = 0.5)+
+  geom_boxplot(fill = "transparent", outlier.shape = NA)+
+  theme_bw()
+ggsave(filename = "figs/sample_avg_vs_sample_size_grouped_by_train_total_safe.png",width = 7, height = 5)
+```
+
+"Safe" and "unsafe" trainloads appear to produce essentially the same sample averages - there is essentially no difference between the pink and teal boxplots!!
+
+What if we try using the geometric mean? (I'm doubtful, but maybe worth a try)
+
+```{r}
+ggplot(sim.tb[sim.tb$sample_size <= 50,], aes(x = sample_size_fct, y = sample_avg_logs, color = train_safety_by_prop))+
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0), pch = 1, alpha = 0.5)+
+  geom_boxplot(fill = "transparent", outlier.shape = NA)+
+  theme_bw()
+```
+
+Oh that's right - you can't take the log of 0 values... so this does not seem hopeful
+
+What if we judge the safety of the trainload based on the average of the trainload?
+
+```{r}
+
+sim.tb <- sim.tb %>% 
+  mutate(train_safety_by_avg = as.factor(ifelse(train_true_avg < 20, "train avg < 20 ppb", "train avg >= 20ppb")))
+
+ggplot(sim.tb[sim.tb$sample_size <= 50,], aes(x = sample_size_fct, y = sample_avg, color = train_safety_by_avg))+
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0), pch = 1, alpha = 0.5)+
+  geom_boxplot(fill = "transparent", outlier.shape = NA)+
+  theme_bw()
+ggsave(filename = "figs/sample_avg_vs_sample_size_grouped_by_train_avg_safe.png",width = 7, height = 5)
+
+```
+
+Interesting.. so all of the trains in this simulation have \< 20 ppb on average.
+
+Wait a sec... maybe the point is that for a given set of alpha, beta, all simulations should be fairly similar.
+
+We want to differentiate between trainloads that are taken from distributions with substantially different alpha, beta, and p's.
+
+# Simulate unsafe supplier
+
+To start, let's try making up an unsafe supplier
+
+(I'm not sure if I want to see differentiation between safe and unsafe trainloads here... or just differentiation from the previous simulation)
+
+```{r}
+# Parameters
+nrailcars_per_train <- 200
+prob_of_zero <- 0.05 # Based on real data, a value of 0.2 would be reasonable.
+shape_param <- 5   # for the gamma distribution (controls skewness)
+scale_param <- 1/0.3    # for the gamma distribution (controls mean)
+
+# See how this distribution looks
+trainload_sim1 <- simulate_trainload(nrailcars_per_train, 
+                               prob_of_zero,
+                               shape_param, scale_param)
+hist(trainload_sim1)
+
+# Simulation settings
+n_sim <- 1000  # Number of simulations per sample size
+
+sim2.tb <- run_simulation(n_sim,
+               nrailcars_per_train, 
+                           prob_of_zero,
+                           shape_param, 
+                           scale_param)
+
+save(sim2.tb, file = "sim_data/simulation_unsafe_supplier_March31_2025.RData")
+
+
+```
+
+```{r}
+# Add columns for train safety
+sim2.tb <- sim2.tb %>% 
+  mutate(train_safety_by_prop = as.factor(ifelse(train_true_safe_prop == 1, "100% < 20 ppb", "some >= 20ppb")))
+sim2.tb <- sim2.tb %>% 
+  mutate(train_safety_by_avg = as.factor(ifelse(train_true_avg < 20, "train avg < 20 ppb", "train avg >= 20ppb")))
+
+table(sim2.tb$train_safety_by_prop)
+# now all of them are unsafe!!
+
+table(sim2.tb$train_safety_by_avg)
+# all have averages that are too high too!
+```
+
+For a given combination of alpha, beta, and p, I think we can calculate the probability that the entire trainload will be safe (by either metric), using the hurdle gamma distribution.
+
+Simplest next step I can think of: The simulation does not use a set p, alpha, and beta, but instead takes a random draw for those values, then simulates the values for the trainload. That would be more likely to give a mix of safe & unsafe trainloads.
+
+# Vary parameters for each simulation
+
+```{r}
+# Function to simulate one trainload
+simulate_trainload_rand_param <- function(nrailcars_per_train, 
+                                          prob_of_zero_range,
+                                          shape_param_range, scale_param_range) {
+  
+  # Step zero: randomly select values for the parameters
+  prob_of_zero <- runif(1, min = prob_of_zero_range[1], max = prob_of_zero_range[2])
+  shape_param <- runif(1, min = shape_param_range[1], max = shape_param_range[2])
+  scale_param <- runif(1, min = scale_param_range[1], max = scale_param_range[2])
+  
+  # Step one: determine if the value is 0 or not
+  # (returns list of 0s and 1s)
+  value_is_nonzero_indicator <- rbinom(n = nrailcars_per_train, 
+                                       size = 1,
+                                       p = 1-prob_of_zero)
+  
+  # Step two: draw from gamma dist
+  gamma_component <- rgamma(nrailcars_per_train, 
+                            shape = shape_param, 
+                            scale = scale_param)  
+  
+  # Step three: Multiply together to get a single vector
+  observed <- value_is_nonzero_indicator*gamma_component
+  
+  return(list(prob_of_zero = prob_of_zero, shape = shape_param, scale = scale_param, values = observed))
+}
+
+run_simulation_rand_param <- function(n_sim, 
+                                      nrailcars_per_train, 
+                                      prob_of_zero_range,
+                                      shape_param_range, 
+                                      scale_param_range) {
+  
+  # Define some quantities
+  candidate_sample_sizes <- seq(5, nrailcars_per_train, by = 5)
+  regulatory_threshold <- 20
+  
+  # Progress bar setup
+  pb <- txtProgressBar(min = 0, max = length(candidate_sample_sizes), style = 3)
+  
+  # Initialize table to save output at each simulation
+  sim.tb <- data.frame()
+  
+  # Loop over candidate sample sizes
+  for (i in seq_along(candidate_sample_sizes)) {
+    n_sample <- candidate_sample_sizes[i]
+    
+    for (j in 1:n_sim) {
+      trainload_sim <- simulate_trainload_rand_param(nrailcars_per_train, 
+                                           prob_of_zero_range,
+                                           shape_param_range, 
+                                           scale_param_range)
+      trainload_sim_ppb <- trainload_sim$values
+      
+      # True safe proportion in the full trainload
+      train_true_safe_prop <- mean(trainload_sim_ppb < regulatory_threshold)
+      train_true_avg <- mean(trainload_sim_ppb)
+      
+      # Draw a random sample of n_sample railcars
+      sample_ppb <- sample(trainload_sim_ppb, n_sample)
+      
+      # Calculate sample information
+      sample_avg <- mean(sample_ppb)
+      fit
+
+      # Save information on the simulation
+      add.tb <- data.frame(sample_size = n_sample,
+                           repid = j,
+                           train_true_safe_prop = train_true_safe_prop,
+                           train_true_avg = train_true_avg,
+                           train_param_prob_of_zero = trainload_sim$prob_of_zero,
+                           train_param_shape = trainload_sim$shape,
+                           train_param_scale = trainload_sim$scale,
+                           sample_avg = sample_avg,
+                           sample_avg_logs = sample_avg_logs)
+      sim.tb <- rbind(sim.tb, add.tb)
+      
+      
+    }
+    
+    setTxtProgressBar(pb, i)  # Update progress bar
+  }
+  close(pb)
+  return(sim.tb)
+}
+
+```
+
+Run simulation
+
+```{r}
+res <- simulate_trainload_rand_param(nrailcars_per_train = 200, c(0, 0.5), c(1, 5), c(1.5, 3.5))
+str(res)
+
+sim3.tb <- run_simulation_rand_param(n_sim = 1000, 
+                                     nrailcars_per_train = 200, 
+                                     prob_of_zero_range = c(0, 0.5), 
+                                     shape_param_range = c(1, 5), 
+                                     scale_param_range = c(1.5, 3.5))
+
+save(sim3.tb, file = "sim_data/simulation_rand_param_March31_2025.RData")
+
+```
+
+See the distribution of safe and unsafe trains
+
+```{r}
+
+sim3.tb <- sim3.tb %>% 
+  mutate(train_safety_by_prop = as.factor(ifelse(train_true_safe_prop == 1, "100% < 20 ppb", "some >= 20ppb")),
+         train_safety_by_avg = as.factor(ifelse(train_true_avg < 20, "train avg < 20 ppb", "train avg >= 20ppb")))
+
+table(sim3.tb$train_safety_by_prop) # about 40-60 split
+table(sim3.tb$train_safety_by_avg) # 100% have < 20 ppb!!
+hist(sim3.tb$train_true_avg)
+```
+
+Okay, so this random param thing produced a good mix of trains that do or do not have some unsafe railcars, but all of the trains have avg railcars ppb
+
+```{r}
+sim3.tb$sample_size_fct <- factor(sim3.tb$sample_size, levels = sort(unique(sim3.tb$sample_size)), ordered = T)
+
+ggplot(sim3.tb[sim3.tb$sample_size <= 50,], aes(x = sample_size_fct, y = sample_avg, color = train_safety_by_prop))+
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0), pch = 1, alpha = 0.5)+
+  geom_boxplot(fill = "transparent", outlier.shape = NA)+
+  theme_bw()
+
+ggsave(filename = "figs/sample_avg_vs_sample_size_grouped_by_train_total_safe_with_rand_param.png",width = 7, height = 5)
+```
+
+Suweet, there is much more separation now!!
+
+Okay, before I celebrate too much -\> I'd like to define shape, scale, and p ranges such that some of the trainloads have avg \> 20 ppb (to show that option to Marissa), but would also like to keep close to 50-50 safe by the other metric.
+
+# Find range of parameters that produces good mix of safe and unsafe trains
+
+```{r}
+simulate_prop_and_avg <- function(prob_of_zero_range,
+                                    shape_param_range,
+                                    scale_param_range) {
+  
+  trainload_sim <- simulate_trainload_rand_param(nrailcars_per_train = 200, 
+                                                 prob_of_zero_range, 
+                                                 shape_param_range, 
+                                                 scale_param_range)
+  
+  
+  trainload_sim_ppb <- trainload_sim$values
+  
+  # True safe proportion in the full trainload
+  train_true_safe_prop <- mean(trainload_sim_ppb < regulatory_threshold)
+  train_true_avg <- mean(trainload_sim_ppb)
+  
+  return(data.frame(train_true_safe_prop, train_true_avg))
+  
+}
+
+res.tb <- data.table::rbindlist(replicate(300, simulate_prop_and_avg(prob_of_zero_range = c(0, 0.5), 
+                                                 shape_param_range = c(1, 5), 
+                                                 scale_param_range = c(1.5, 3.5)), simplify = FALSE))
+
+# Let's try increasing the variance
+res.tb <- data.table::rbindlist(replicate(300, simulate_prop_and_avg(prob_of_zero_range = c(0, 0.5), 
+                                                 shape_param_range = c(1, 5), 
+                                                 scale_param_range = c(1, 5)), simplify = FALSE))
+hist(res.tb$train_true_avg)
+table(res.tb$train_true_safe_prop == 1)
+
+# okay, now we have a few that are higher! Let's try to get even more...
+res.tb <- data.table::rbindlist(replicate(300, simulate_prop_and_avg(prob_of_zero_range = c(0, 0.5), 
+                                                 shape_param_range = c(1, 7), 
+                                                 scale_param_range = c(1, 7)), simplify = FALSE))
+hist(res.tb$train_true_avg) # okay, now quite a few are above!
+table(res.tb$train_true_safe_prop == 1) # but several are not safe by this metric
+
+
+# okay, now we have a few that are higher! Let's try to get even more...
+res.tb <- data.table::rbindlist(replicate(300, simulate_prop_and_avg(prob_of_zero_range = c(0, 0.4), 
+                                                 shape_param_range = c(1, 5), 
+                                                 scale_param_range = c(1, 10)), simplify = FALSE))
+hist(res.tb$train_true_avg) # okay, now quite a few are above!
+table(res.tb$train_true_safe_prop == 1) # but several are not safe by this metric
+
+```
+
+I think it will be difficult to simulation a data set that checks both boxes for safety.
+
+So let's just focus on the metric of 100% of railcars are safe, for now.
+
+Let's try to get 50-50 split for that with even-ish numbers
+
+```{r}
+res.tb <- data.table::rbindlist(replicate(1000, simulate_prop_and_avg(prob_of_zero_range = c(0, 0.4), 
+                                                 shape_param_range = c(0.5, 4), 
+                                                 scale_param_range = c(1, 5)), simplify = FALSE))
+hist(res.tb$train_true_avg)
+table(res.tb$train_true_safe_prop == 1)
+```
+
+That seems pretty okay.
+
+# Estimate train params with sample data
+
+ALSO... what if I considered estimating the shape and scale...?
+
+Let's just explore - what the probability of the 200 railcars being less than 200? given the sample estimates. Do those probabilities seem... like potentially a better separator than the sample avg?
+
+Or, what if we use the the parameters estimates +/- 1 or 2 SD?
+
+Note that proportion of 0s will probably be harder to estimate... maybe keep that fixed?
+
+Can we estimate the probability that 100% of the trainload is safe if we know p, shape, and scale?
+
+$$
+Pr(Y=y)=1(y=0)*p+1(y>0)*(1-p)*f_{gamma}
+$$
+
+Joint probability for a whole trainload
+
+$$
+Pr(Y_1 \leq 20, ..., Y_{200} \leq 20) = \prod_{i=1}^{200} Pr(Y_i \leq 20) = (Pr(Y_1 \leq 20))^{200}
+$$
+
+$$
+Pr(Y_1 \leq 20) = p + (1-p) \int_{y=0}^{20}f_{gamma}(y)dy
+$$
+
+So, using approximately the probabilities fit to the real data, we get:
+
+```{r}
+prob_one_obs_below_20 <- 0.2 + (1-0.2)*pgamma(q = 20, shape = 1.4, scale = 1/0.428, lower.tail = TRUE)
+prob_one_obs_below_20
+prob_one_obs_below_20^200
+
+```
+
+Which is very small, as would be expected
+
+Updated function that includes MLE fit
+
+```{r}
+run_simulation_rand_param <- function(n_sim, 
+                                      nrailcars_per_train, 
+                                      prob_of_zero_range,
+                                      shape_param_range, 
+                                      scale_param_range) {
+  
+  # Define some quantities
+  candidate_sample_sizes <- seq(5, nrailcars_per_train, by = 5)
+  regulatory_threshold <- 20
+  
+  # Progress bar setup
+  pb <- txtProgressBar(min = 0, max = length(candidate_sample_sizes), style = 3)
+  
+  # Initialize table to save output at each simulation
+  sim.tb <- data.frame()
+  
+  # Loop over candidate sample sizes
+  for (i in seq_along(candidate_sample_sizes)) {
+    n_sample <- candidate_sample_sizes[i]
+    
+    for (j in 1:n_sim) {
+      
+      trainload_sim <- simulate_trainload_rand_param(nrailcars_per_train, 
+                                           prob_of_zero_range,
+                                           shape_param_range, 
+                                           scale_param_range)
+      trainload_sim_ppb <- trainload_sim$values
+      
+      # True safe proportion in the full trainload
+      train_true_safe_prop <- mean(trainload_sim_ppb < regulatory_threshold)
+      train_true_avg <- mean(trainload_sim_ppb)
+      
+      # Draw a random sample of n_sample railcars
+      sample_ppb <- sample(trainload_sim_ppb, n_sample)
+      
+      # Calculate sample information
+      sample_avg <- mean(sample_ppb)
+      est_param_prob_of_zero <- sum(sample_ppb == 0)/n_sample
+      gamma.fit <- tryCatch(fitdistr(x = sample_ppb[sample_ppb > 0], densfun = "gamma"), 
+                            error = function(err) structure(list(c(NA, NA), c(NA, NA)), names = c("estimate","sd"))) %>% 
+        suppressWarnings()
+
+      # Save information on the simulation
+      add.tb <- data.frame(sample_size = n_sample,
+                           repid = j,
+                           train_true_safe_prop = train_true_safe_prop,
+                           train_true_avg = train_true_avg,
+                           train_param_prob_of_zero = trainload_sim$prob_of_zero,
+                           train_param_shape = trainload_sim$shape,
+                           train_param_scale = trainload_sim$scale,
+                           sample_avg = sample_avg,
+                           est_param_shape = gamma.fit$estimate["shape"],
+                           est_param_shape_sd = gamma.fit$sd["shape"],
+                           est_param_rate = gamma.fit$estimate["rate"],
+                           est_param_rate_sd = gamma.fit$sd["rate"],
+                           gamma_fit_AIC = ifelse(is.na(gamma.fit$estimate["shape"]), NA, AIC(gamma.fit)))
+      rownames(add.tb) <- NULL
+      sim.tb <- rbind(sim.tb, add.tb)
+      
+      
+    }
+    
+    setTxtProgressBar(pb, i)  # Update progress bar
+  }
+  close(pb)
+  return(sim.tb)
+}
+
+```
+
+Run simulation
+
+```{r}
+sim4.tb <- run_simulation_rand_param(n_sim = 1000, 
+                          nrailcars_per_train = 200, 
+                          prob_of_zero_range = c(0, 0.4),
+                          shape_param_range = c(1, 4), 
+                          scale_param_range = c(1,4))
+```
+
+View results
+
+```{r}
+sim4.tb <- sim4.tb %>% 
+  mutate(train_safety_by_prop = as.factor(ifelse(train_true_safe_prop == 1, 
+                                                 "100% < 20 ppb",
+                                                 "some >= 20ppb")),
+         train_safety_by_avg = as.factor(ifelse(train_true_avg < 20, 
+                                                "train avg < 20 ppb", 
+                                                "train avg >= 20ppb")))
+
+hist(sim4.tb$train_true_avg)
+table(sim4.tb$train_safety_by_prop)
+#100% < 20 ppb some >= 20ppb 
+#         9766         10234 
+# close to 50-50, as desired!
+
+```
+
+How does it seem like the sample average will fair for separating safe and unsafe trainloads?
+
+```{r}
+sim4.tb$sample_size_fct <- factor(sim4.tb$sample_size, levels = sort(unique(sim4.tb$sample_size)), ordered = T)
+
+ggplot(sim4.tb[sim4.tb$sample_size <= 50,], aes(x = sample_size_fct, y = sample_avg, color = train_safety_by_prop))+
+
+  geom_jitter(position = position_jitterdodge(jitter.width = 0.5, jitter.height = 0), pch = 1, alpha = 0.5)+
+
+  geom_boxplot(fill = "transparent", outlier.shape = NA)+
+
+  theme_bw()
+
+ggsave(filename = "figs/sample_avg_vs_sample_size_grouped_by_train_total_safe_with_rand_param_500sim_v2.png",width = 7, height = 5)
+```
+
+Cool! This looks promising.
+
+Possible ways to proceed from here:
+
+**Focus on sample average**
+
+-   For each sample size \< 50, create a graph of the type 1 error rate & power as a function of the sample avg cutoff. Include CI's for the rates?
+
+-   Fix a tolerable type 1 error rate. Solve for the sample threshold that satisfies and acheives optimal power. Show threshold versus n, and power versus n.
+
+**Compare to results if use Pr(Yi \<= 20):**
+
+-   Estimate the probability that Yi \<= 20 based on MLEs for each sample
+
+-   See if these probability estiamtes to better separation between safe & unsafe trainloads than the sample average?
+
+```{r}
+try_sample_avg_thresholds <- seq(0, 15, by = 1)
+
+thresholds.tb <- data.frame()
+
+for (threshold in try_sample_avg_thresholds) {
+  threshold.tb <- sim4.tb %>% 
+    mutate(threshold = threshold, train_accepted = sample_avg < threshold) %>% 
+    group_by(sample_size, train_safety_by_prop, threshold) %>% 
+    reframe(num_accepted = sum(train_accepted), total = n())  
+  
+  thresholds.tb <- rbind(thresholds.tb,
+                         threshold.tb)
+}
+
+
+# Calculate summaries for each sample size and threshold
+thresholds.tb <- thresholds.tb %>% 
+  mutate(frac_accepted = num_accepted / total)
+
+# calculate CI for frac_accepted (asymptotics apply since nsim is large)
+thresholds.tb <- thresholds.tb %>% 
+  mutate(frac_accepted_lb = frac_accepted - 1.96*sqrt(frac_accepted*(1-frac_accepted)/total),
+         frac_accepted_ub = frac_accepted + 1.96*sqrt(frac_accepted*(1-frac_accepted)/total))
+
+
+ggplot(thresholds.tb[thresholds.tb$sample_size <= 30,], aes(x = threshold, y = frac_accepted, color = train_safety_by_prop, fill = train_safety_by_prop)) +
+  geom_point()+
+  geom_ribbon(aes(ymin = frac_accepted_lb, ymax = frac_accepted_ub), alpha = 0.2, linewidth = 0)+
+  geom_line()+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+
+  facet_wrap(vars(sample_size),nrow = 2)+
+  theme_bw()
+
+ggsave(filename = "figs/type1_error_rate_and_power_vs_threshold_for_low_n.png", width = 9, height = 5)
+```
+
+Observations:
+
+-   For a set threshold (e.g., 5), the power does appear to increase for the first few sample sizes... though not htat much after that
+
+-   For any given threshold,the power is higher than the type 1 error rate!! So that's good
+
+-   For all of these sample sizes, it appears that a threshold of around 3 would be needed to acheive a size of 0.05. That would correspond to a power of about 50% for most of these sample sizes.
+
+That power level is not great... does it go up with higher sample sizes?
+
+```{r}
+ggplot(thresholds.tb[thresholds.tb$threshold == 3,], 
+       aes(x = sample_size,
+           y = frac_accepted, 
+           color = train_safety_by_prop, fill = train_safety_by_prop)) +
+  geom_point()+
+  geom_ribbon(aes(ymin = frac_accepted_lb, ymax = frac_accepted_ub), alpha = 0.2, linewidth = 0)+
+  geom_line()+
+  geom_hline(yintercept = 0.05, linetype = "dashed")+
+  theme_bw()
+
+ggsave(filename = "figs/type1_error_rate_and_power_vs_sample_size_for_threshold_3.png", width = 9, height = 5)
+
+```
+
+No, not really!!
+
+I should check the code... but I have a feelign the issue that there is only so well that you can predict the maximum value of the train based on the sample average.
+
+I think the MLE method may be warranted!!
+
+RESUME HERE:
+
+-   check code
+
+-   Then try MLE method, see if it can give better power! (basically, I think I'd rather tell her she needs large n than to jsut give a test that always has low power!) BUT, maybe if that's the way it is, it is okay!! Maybe this is a reason to use a different definition for a "safe" train.
+
+# Visualizations
+
+```{r}
+
+# Plot the results
+ggplot(results, aes(x = n_sample, y = false_negative_rate)) +
+  geom_line(color = "steelblue", linewidth = 1.2) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = "False Negative Rate vs. Sample Size",
+    subtitle = paste("Based on", n_sim, "simulations per sample size"),
+    x = "Sample Size (number of railcars tested)",
+    y = "False Negative Rate (proportion)"
+  ) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  scale_x_continuous(breaks = seq(0, nrailcars_per_train, by = 20)) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    panel.grid.major = element_line(color = "gray90"),
+    panel.grid.minor = element_blank()
+  )
+```
