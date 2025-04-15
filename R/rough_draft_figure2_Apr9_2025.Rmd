@@ -1,0 +1,65 @@
+---
+title: "Figure2 for Rough Draft"
+output: html_document
+date: "2025-04-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(MASS)
+library(readxl)
+```
+
+# Figure 2
+
+Load data raw
+
+```{r}
+dat <- read_xlsx("data/Aflatoxin Testing Results 2024-2025_MHC.xlsx")
+
+# Clean column names
+dat <- dat %>% 
+  rename(Date = `Sample Date`, ticket_num = `Ticket #`, aflatoxin_ppb = `Aflatoxins, ppb`)
+```
+
+Fit gamma model to the positive values
+```{r}
+dat_pos <- dat %>% 
+  filter(aflatoxin_ppb > 0)
+
+fit.gamma <- fitdistr(dat_pos$aflatoxin_ppb, densfun = "gamma")
+```
+
+Histogram of full data, show gamma fit
+
+```{r}
+# Get values from gamma distribution
+xvals <- seq(1e-4, 20, by = 0.1)
+gamma_vals <- dgamma(x = xvals, 
+        shape = fit.gamma$estimate[1],
+       rate = fit.gamma$estimate[2])
+gamma.tb <- data.frame(x = xvals, prob_density = gamma_vals)
+
+# Graph
+ggplot(dat, aes(x = aflatoxin_ppb)) +
+  geom_histogram(mapping = aes(y = after_stat(density)), 
+                 breaks = seq(from = -1, to = max(dat$aflatoxin_ppb), by = 0.5), 
+                 closed = "right")+
+  geom_line(data = gamma.tb, aes(x = x, y = prob_density), col = "cornflowerblue", linewidth = 1.5)+
+  theme(text = element_text(size = 15))+
+  ggtitle("Histogram of Aflatoxin Values (in ppb)\nfrom one facility in 2024-2025")+
+  xlab("Aflatoxin level (ppb)")
+
+ggsave(filename = "figs/raw_data_full_histogram_zeros_separate_bin_with_gamma.png", width = 6, height = 6)
+
+# View relevant parameters
+data.frame(prob_of_zero = sum(dat$aflatoxin_ppb == 0)/nrow(dat),
+           shape = fit.gamma$estimate["shape"],
+           scale = 1/fit.gamma$estimate["rate"])
+```
+

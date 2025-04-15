@@ -1,0 +1,329 @@
+---
+title: "Rough Draft: Simulation part 2"
+output: html_document
+date: "2025-04-09"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+```
+
+# Goal
+
+Specifically, we want to simulate:
+
+* Take a scoop from every individual railcar in a train (assume homogeneity within each railcar)
+* Composite the scoops into groups of X and calculate the average aflatoxin level in the composites.
+* Decide to accept or reject the trainload based on whether any composite has more than 20 ppb
+
+
+
+# Define functions for simulation
+
+Function to simulate trainload with fixed parameters
+
+```{r}
+# Function to simulate one trainload
+simulate_trainload <- function(nrailcars_per_train, 
+                               prob_of_zero,
+                               shape_param, 
+                               scale_param) {
+  
+  # Step one: determine if the value is 0 or not
+  # (returns list of 0s and 1s)
+  value_is_nonzero_indicator <- rbinom(n = nrailcars_per_train, 
+                                       size = 1,
+                                       p = 1-prob_of_zero)
+  
+  # Step two: draw from gamma dist
+  gamma_component <- rgamma(nrailcars_per_train, 
+                            shape = shape_param, 
+                            scale = scale_param)  
+  
+  # Step three: Multiply together to get a single vector
+  observed <- value_is_nonzero_indicator*gamma_component
+  
+  return(observed)
+}
+```
+
+Function to loop through grid of parameter values and simulate several trainloads for each
+
+```{r}
+# Define combinations of parameter values to simulation
+param.tb <- expand.grid(prob_of_zero = seq(0, 0.05, by = 0.05), # 2 
+                        shape_param = seq(1, 4, by = 1), # 4
+                        scale_param = seq(1, 5, by = 1), # 5
+                        num_railcars_per_composite = c(5, 10, 20, 40))
+
+# Function to simulate 
+run_simulation <- function(n_sim_per_param, param.tb, 
+                           nrailcars_per_train = 200, 
+                           regulatory_threshold = 20) {
+  
+  # Progress bar setup
+  pb <- txtProgressBar(min = 0, max = nrow(param.tb), style = 3)
+  
+  # Initialize table to save output at each simulation
+  sim.tb <- data.frame()
+  
+  # Loop over parameter combinations
+  for (i in 1:nrow(param.tb)) {
+    
+    parameters <- param.tb[i,]
+
+    for (j in 1:n_sim_per_param) {
+      
+      trainload_sim_ppb <- simulate_trainload(nrailcars_per_train, 
+                                              parameters$prob_of_zero,
+                                              parameters$shape_param, 
+                                              parameters$scale_param)
+
+      # True safe proportion in the full trainload
+      train_true_safe_prop <- mean(trainload_sim_ppb < regulatory_threshold)
+      
+      # Simulate getting composite samples
+      num_composites <- nrailcars_per_train / parameters$num_railcars_per_composite
+      trainload_sim_tb <- data.frame(values = trainload_sim_ppb,
+                                     composite_id = rep(1:num_composites, 
+                                                        each = parameters$num_railcars_per_composite ))
+      facility_sim_tb <- trainload_sim_tb %>% 
+        group_by(composite_id) %>% 
+        reframe(afla_in_composite = mean(values))
+
+      # Save information on the simulation
+      add.tb <- data.frame(parameter_id = i,
+                           rep_id = j,
+                           
+                           # True trainload data
+                           train_true_safe_prop = train_true_safe_prop,
+                           
+                           # Facility data
+                           prop_safe_composites = mean(facility_sim_tb$afla_in_composite < regulatory_threshold),
+                           composites_avg = mean(facility_sim_tb$afla_in_composite),
+                           composites_sd = sd(facility_sim_tb$afla_in_composite))
+      sim.tb <- rbind(sim.tb, add.tb)
+      
+    }
+    
+    setTxtProgressBar(pb, i)  # Update progress bar
+  }
+  close(pb)
+  return(sim.tb)
+}
+```
+
+# Run simulation 
+
+```{r eval = FALSE}
+set.seed(454)
+res2 <- run_simulation(n_sim_per_param = 500, param.tb)
+save(res2, file = "sim_data/simulation2_parameter_grid_Apr9_2025.RData")
+```
+
+Clean results
+
+```{r}
+load("sim_data/simulation2_parameter_grid_Apr9_2025.RData")
+
+# Add labels
+res2 <- res2 %>% 
+  mutate(train_is_safe = train_true_safe_prop == 1)
+param.tb$parameter_id <- 1:nrow(param.tb)
+res2 <- res2 %>% 
+  left_join(param.tb, by = "parameter_id")
+res2 <- res2 %>%
+  mutate(trainload_pass = prop_safe_composites == 1)
+
+# Calculate power, etc
+summary2.tb <- res2 %>% 
+  group_by(parameter_id, prob_of_zero, shape_param, scale_param, num_railcars_per_composite, train_is_safe) %>% 
+  reframe(total_trains = n(), 
+          num_pass = sum(trainload_pass),
+          num_fail = sum(!trainload_pass),
+          frac_pass = sum(trainload_pass)/n(),
+          frac_pass_moe = 1.96*sqrt(frac_pass*(1-frac_pass)/total_trains),
+          frac_pass_ci_lb = frac_pass - frac_pass_moe,
+          frac_pass_ci_ub = frac_pass + frac_pass_moe)
+```
+
+# Plots/results for rough draft
+
+## Figure 4
+
+```{r}
+# Add identifier to link parameter combinations that are the same except for 'num railcars per composite'
+summary2.tb <- summary2.tb %>% 
+  mutate(parameter_id_sans_num_railcars_per_composite = paste(prob_of_zero, shape_param, scale_param, sep = "_"),
+         parameter_id_sans_scale = paste(prob_of_zero, shape_param, sep = "_"))
+
+# Prepare data toplot
+plotdat <- summary2.tb %>% 
+  filter(!train_is_safe, scale_param > 1, prob_of_zero == 0.05)
+
+# Denote scale more clearly
+plotdat <- plotdat %>% 
+  mutate(scale_plot = paste("scale:",scale_param))
+plotdat$shape = as.factor(plotdat$shape_param)
+
+# facet by scale, color by shape
+ggplot(plotdat, 
+       aes(x = num_railcars_per_composite, y = frac_pass, color = shape))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_num_railcars_per_composite))+
+  facet_wrap(vars(scale_plot))+
+  ylab("Type 1 Error Rate")+
+  xlab("Number of Railcars per Composite")+
+  theme_bw()+
+  theme(text = element_text(size = 15))
+
+ggsave(filename = "figs/type1_error_rate_vs_num_railcars_per_composite_facet_scale.png", width = 6, height = 4)
+```
+
+See number of unsafe trains per parameter combo, when scale >= 3
+
+```{r}
+summary2.tb %>% 
+  filter(scale_param >= 3, !train_is_safe) %>% 
+  select(total_trains) %>% 
+  summary
+ # total_trains  
+ # Min.   : 92.0  
+ # 1st Qu.:471.2  
+ # Median :500.0  
+ # Mean   :448.6  
+ # 3rd Qu.:500.0  
+ # Max.   :500.0
+```
+
+Cool, so at minimum, there were at least 92 unsafe trainloads for parameter combinations with scale >= 3.
+
+## Figure 5
+
+Show some trainloads
+
+```{r}
+example.dat <- sapply(2:5, simulate_trainload, nrailcars_per_train = 200,
+                             prob_of_zero = 0.05, shape_param = 4)
+colnames(example.dat) <- paste0("scale: ",2:5)
+example.dat <- as.data.frame(example.dat)
+
+example.dat <- example.dat %>% 
+  pivot_longer(paste0("scale: ",2:5), values_to = "ppb")
+
+ggplot(example.dat, aes(x = ppb)) +
+  geom_histogram()+
+  geom_vline(xintercept = 20, color = "blue")+
+  facet_wrap(vars(name))+
+  xlab("Aflatoxin level (ppb)")+
+  ylab("Number of railcars")+
+  theme_bw()+
+  theme(text = element_text(size = 15))
+
+ggsave(filename = "figs/example_trainload_dist_prob_0.05_shape_4_scale_facet.png", width = 6, height = 4)
+```
+
+
+## Confirm 100% of safe trains accepted
+
+```{r}
+summary2.tb %>% 
+  filter(train_is_safe) %>% 
+  select(frac_pass) %>% 
+  summary
+
+```
+
+Yep, 100% of simulated trainloads that were safe passed.
+
+I guess this makes sense - if the trainload truly is safe, then there is no way that any composite sample will be greater than 20.
+
+
+# (old) Exploratory plots/results
+
+```{r}
+summary2.tb <- summary2.tb %>% 
+  mutate(parameter_id_sans_num_railcars_per_composite = paste(prob_of_zero, shape_param, scale_param, sep = "_"),
+         parameter_id_sans_scale = paste(prob_of_zero, shape_param, sep = "_"))
+
+ggplot(summary2.tb, aes(x = num_railcars_per_composite, y = frac_pass, color = train_is_safe))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_num_railcars_per_composite))+
+  facet_wrap(vars(train_is_safe))
+# Once again, 100% of the safe trains pass (i.e., producers risk or Type 2 error rate is always 0)
+
+# Focus on type 1 error rate
+
+# Which param(s) seem to be controlling the results the most?
+# prob of zero - no
+ggplot(summary2.tb[summary2.tb$train_is_safe == FALSE,], 
+       aes(x = num_railcars_per_composite, y = frac_pass, color = as.factor(shape_param)))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_num_railcars_per_composite))+
+  facet_wrap(vars(train_is_safe))
+
+ggplot(summary2.tb[summary2.tb$train_is_safe == FALSE,], 
+       aes(x = num_railcars_per_composite, y = frac_pass, color = as.factor(scale_param)))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_num_railcars_per_composite))+
+  facet_wrap(vars(train_is_safe))
+
+
+
+# Possibly some kidn of ineraction effect between the shape and scale param....
+# let's color by shape, x-axis is scale, then facet by num_railcars_per_composite
+summary.unsafe <- summary2.tb[summary2.tb$train_is_safe == FALSE,]
+
+ggplot(summary.unsafe, aes(x = scale_param, y = frac_pass, color = as.factor(shape_param)))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_scale))+
+  geom_errorbar(aes(ymin = frac_pass_ci_lb, ymax = frac_pass_ci_ub))+
+  facet_wrap(vars(num_railcars_per_composite))
+
+
+ggplot(summary.unsafe, aes(x = scale_param, y = total_trains, color = as.factor(shape_param)))+
+  geom_point()+
+    geom_line(aes(group = parameter_id_sans_scale))+
+  facet_wrap(vars(num_railcars_per_composite))
+```
+
+```{r}
+ggplot(summary.unsafe, 
+       aes(x = num_railcars_per_composite, y = frac_pass, color = as.factor(scale_param)))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_num_railcars_per_composite))+
+    geom_errorbar(aes(ymin = frac_pass_ci_lb, ymax = frac_pass_ci_ub))+
+  facet_wrap(vars(shape_param))
+
+summary2.tb %>% 
+  filter(scale_param == 1, train_is_safe == FALSE) %>% 
+  select(prob_of_zero, shape_param, train_is_safe, total_trains, num_pass)
+#  When scale_param == 1, there were max of 2 unsafe trains
+# So we can ignore this case
+
+# facet by scale, color by shape
+ggplot(summary.unsafe[summary.unsafe$scale_param > 1,], 
+       aes(x = num_railcars_per_composite, y = frac_pass, color = as.factor(shape_param)))+
+  geom_point()+
+  geom_line(aes(group = parameter_id_sans_num_railcars_per_composite))+
+    geom_errorbar(aes(ymin = frac_pass_ci_lb, ymax = frac_pass_ci_ub))+
+  facet_wrap(vars(scale_param))
+
+```
+
+Why is it that when the scale param == 2, 100% of unsafe trains are accepted? That seems odd to me... 
+Let's look at a distribution
+
+```{r}
+dat_unsafe <- simulate_trainload(200, 0, shape_param = 4, scale_param = 2)
+hist(dat_unsafe)
+```
+
+I guess the idea is that when the variability is relatively low, then if any railcars are high, it's unlikely that any individual composite will show as being unsafe, even if you have relatively few samples per composite! That's a cool takeaway!!
+
