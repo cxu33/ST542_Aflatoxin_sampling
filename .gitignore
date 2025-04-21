@@ -3,3 +3,6 @@
 .RData
 .Ruserdata
 542_Aflatoxin_sampling.Rproj
+
+data/
+sim_data/

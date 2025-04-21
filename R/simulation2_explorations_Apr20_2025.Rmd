@@ -1,0 +1,97 @@
+---
+title: "Explore simulated data"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+    df_print: paged
+date: "2025-04-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+```
+
+
+# Data prep
+
+```{r}
+# Load the data
+load("sim_data/simulation2_parameter_grid_Apr9_2025.RData")
+
+# Define combinations of parameter values to simulation
+param.tb <- expand.grid(prob_of_zero = seq(0, 0.05, by = 0.05), # 2 
+                        shape_param = seq(1, 4, by = 1), # 4
+                        scale_param = seq(1, 5, by = 1), # 5
+                        num_railcars_per_composite = c(5, 10, 20, 40))
+
+# Add labels
+res2 <- res2 %>% 
+  mutate(train_is_safe = train_true_safe_prop == 1)
+param.tb$parameter_id <- 1:nrow(param.tb)
+res2 <- res2 %>% 
+  left_join(param.tb, by = "parameter_id")
+res2 <- res2 %>%
+  mutate(trainload_pass = prop_safe_composites == 1)
+
+# Calculate power, etc
+summary2.tb <- res2 %>% 
+  group_by(parameter_id, prob_of_zero, shape_param, scale_param, num_railcars_per_composite, train_is_safe) %>% 
+  reframe(total_trains = n(), 
+          num_pass = sum(trainload_pass),
+          num_fail = sum(!trainload_pass),
+          frac_pass = sum(trainload_pass)/n(),
+          frac_pass_moe = 1.96*sqrt(frac_pass*(1-frac_pass)/total_trains),
+          frac_pass_ci_lb = frac_pass - frac_pass_moe,
+          frac_pass_ci_ub = frac_pass + frac_pass_moe)
+```
+
+# What's the breakdown of safe to unsafe trains for each param combination?
+
+```{r}
+plotdat <- summary2.tb %>% 
+  filter(num_railcars_per_composite == 20) %>% 
+  mutate(param_combo= paste0(prob_of_zero, shape_param, scale_param))
+
+ggplot(plotdat, aes(y = param_combo, x = total_trains, fill = train_is_safe))+
+  scale_fill_viridis_d(option = "magma")+
+  geom_col()
+
+ggplot(plotdat %>% filter(prob_of_zero == 0.05, scale_param >= 2), aes(x = shape_param, y = total_trains, fill = train_is_safe))+
+  scale_fill_viridis_d(option = "magma")+
+  geom_col()+
+  facet_wrap(vars(scale_param))+
+  theme_bw()+
+  ggtitle("Distribution of safe vs unsafe trainloads for parameter combinations\nprob of zero = 5%")
+
+ggplot(plotdat %>% filter(prob_of_zero == 0, scale_param >= 2), aes(x = shape_param, y = total_trains, fill = train_is_safe))+
+  scale_fill_viridis_d(option = "magma")+
+  geom_col()+
+  facet_wrap(vars(scale_param))+
+  theme_bw()+
+  ggtitle("Distribution of safe vs unsafe trainloads for parameter combinations\nprob of zero = 0%")
+```
+
+# Explore the problematic areas
+
+```{r}
+plotdat <- res2 %>% 
+  filter(train_is_safe == FALSE) %>% 
+  group_by(parameter_id, prob_of_zero, shape_param, scale_param, num_railcars_per_composite, trainload_pass) %>% 
+  reframe(num_trainloads = n())
+
+ggplot(plotdat, aes(x = shape_param, y = num_trainloads, fill = trainload_pass))+
+  geom_col()+
+  facet_grid(cols = vars(scale_param), rows = vars(num_railcars_per_composite))
+
+```
+
+Okay, so it seems like there is a real concern here with MANY unsafe trainloads not getting detected at low scale values.
+
+BUT, let's check out just how many and how severe are those unsafe railcars?

@@ -1,0 +1,173 @@
+---
+title: "542 simulation brainstorming"
+format: html
+editor: visual
+---
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(data.table)
+```
+
+# Simulate data coming from 1 supplier
+
+A data generating model with random effects for Train and Rail Car
+
+$$
+Y_{ij} = \mu  +A_i + E_{ij}
+$$
+
+Where $Y_{ij}$ denotes the aflatoxin level in (log10-ppb units) for the ith train and the jth railcar.
+
+$$
+i=1,2,... \text{  = index of the train}
+$$
+
+$$
+j=1,2,...r_i \text{ = index of railcar in the } i\text{th train}
+$$
+
+$$
+A_i \text{ ~ iid } N(0, \sigma^2_A) \text{ = random effect due to ith train}
+$$
+
+$$ E_{ij} \text{ ~ iid } N(0, \sigma^2_E) \text{ = random effect due to jth rail car} $$
+
+Also assume all $A_i$ and $E_{ij}$ are independent.
+
+```{r}
+# Population parameters
+mean_aflatoxin <- log10(30) # Say the mean aflatoxin level is high, e.g., 30 ppb (transformed to log10 units)
+train_effect_sd <- log10(10) # in units of log10-ppb aflatoxin
+railcar_effect_sd <- log10(2) # in units of log10-ppb aflatoxin
+
+# Number of trains/railcars to simulate
+nrailcars_per_train <- 200
+ntrains <- 1
+
+set.seed(393)
+
+# Generate table of Random train effects
+train_effect <- data.frame(train_id = 1:ntrains,
+                           train_effect = rnorm(n = ntrains, 
+                                                mean = 0, 
+                                                sd = train_effect_sd))
+
+train_effect
+
+# Generate table of random rail car effects
+railcar_effect <- data.frame(train_id = rep(1:ntrains, each = nrailcars_per_train),
+                             railcar_id = rep(1:nrailcars_per_train, times = ntrains),
+                             railcar_effect = rnorm(n = ntrains*nrailcars_per_train,
+                                                    mean = 0, 
+                                                    sd = railcar_effect_sd))
+
+# Merge tables
+dat <- merge(train_effect, railcar_effect, by = "train_id", all = TRUE)
+
+# Calculate the aflatoxin level in the jth rail car from the ith train
+dat <- dat %>% 
+  mutate(y = mean_aflatoxin + train_effect + railcar_effect)
+
+# Make some variables factors
+dat <- dat %>% 
+  mutate(train_id = as.factor(train_id))
+
+
+head(dat)
+
+```
+
+# Simulation...
+
+```{r}
+num_cars_sampled <- 5 # number of railcars sampled
+
+# Take a random subsample of the railcars in the train
+sample <- dat[(sample(nrow(dat), size = num_cars_sampled, replace = FALSE)),]
+num_safe_in_sample <- sum(sample$y < log10(20))
+
+# Calculate probability of observing "more extreme" num_safe_in_sample for a given...
+calc_pval <- function(num_safe_in_train, nrailcars_per_train, 
+                      num_safe_in_sample, num_cars_sampled) {
+  
+  observed_prob <- dhyper(x = num_safe_in_sample,
+                           m = num_safe_in_train,
+                           n = nrailcars_per_train - num_safe_in_train,
+                           k = num_cars_sampled)
+  
+  all_probs <- dhyper(x = 1:num_cars_sampled,
+                      m = num_safe_in_train,
+                      n = nrailcars_per_train - num_safe_in_train,
+                      k = num_cars_sampled)
+  
+  sum(all_probs[all_probs <= observed_prob])
+}
+
+ci_for_num_safe_in_train <- function(nrailcars_per_train, 
+                                     num_cars_sampled, 
+                                     num_safe_in_sample,
+                                     plot = FALSE) {
+  
+  # Calculate pvales for all possible num_safe_in_train values,
+  # given the observed num_safe_in_sample (or "more extreme")
+  res <- unlist(lapply(1:nrailcars_per_train, 
+                       calc_pval, 
+                       nrailcars_per_train, 
+                       num_safe_in_sample, 
+                       num_cars_sampled))
+  res.tb <- data.frame(pval = res, num_safe_in_train = 1:nrailcars_per_train)
+  if (plot) plot(res.tb$pval)
+
+  # confidence interval valus
+  ci.vals <- which(res.tb$pval > 0.05)
+  ci.range <- range(ci.vals)
+  # Confirm no holes
+  has_gaps <- length(setdiff(seq(ci.range[1], ci.range[2], by = 1), ci.vals)) != 0
+  return(c(ci.range, has_gaps))
+}
+
+
+
+```
+
+Try it with larger sample?
+
+```{r}
+ci_for_num_safe_in_train(nrailcars_per_train = 200, 
+                         num_cars_sampled = 10, 
+                         num_safe_in_sample = 10)
+
+
+# Try a range of num_cars_sampled values
+ci.tb <- data.table()
+for (num_cars_sampled in 1:200) {
+  ci.res <- ci_for_num_safe_in_train(nrailcars_per_train = 200, 
+                         num_cars_sampled = num_cars_sampled , 
+                         num_safe_in_sample = num_cars_sampled # assuming all cars test clean
+                         )
+  ci.tb <- rbind(ci.tb, data.table(ci_lb = ci.res[1],
+                                   ci_ub = ci.res[2],
+                                   has_gaps = ci.res[3]))
+  
+}
+
+ci.tb[, num_cars_sampled := 1:200]
+
+View(ci.tb)
+
+ci_for_num_safe_in_train(nrailcars_per_train = 200, 
+                         num_cars_sampled = 191, 
+                         num_safe_in_sample = 191, plot = TRUE)
+```
+
+# Thoughts
+
+We might be able to do something with this hypergeometric approach... e.g., answer qs like:
+
+-   If we only sample \_\_\_ cars, what would be a 95% CI for the number of safe cars in the whole train load?
+
+-   How many railcars would have to be sampled in order for the 95% CI to ony contain all 200 rail cars? (i.e., 200 safe railcars is the only num_safe_in_train value that corresponds to pvalue \> 0.05).
+
+This approach may have some value, but I think that we could leverage the normality of the distribution and the continuity of the response to get a much tighter estimate...
