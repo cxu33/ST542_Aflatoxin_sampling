@@ -1,0 +1,72 @@
+load("/Users/changxu/Desktop/NCSU/ST542/simulation2_parameter_grid_Apr9_2025.RData")
+
+# Add labels
+# A train is considered truly safe if the proportion of railcars below the regulatory threshold is at least tp.
+target_safe_proportions <- c(0.9, 0.95, 0.99, 1)
+res2 <- res2 %>%
+  crossing(target_safe_proportions = target_safe_proportions)
+res2 <- res2 %>% 
+  mutate(train_is_safe = train_true_safe_prop >= target_safe_proportions)
+param.tb$parameter_id <- 1:nrow(param.tb)
+res2 <- res2 %>% 
+  left_join(param.tb, by = "parameter_id")
+res2 <- res2 %>%
+  mutate(trainload_pass = prop_safe_composites == 1)
+
+# Calculate power, etc
+summary2.tb <- res2 %>% 
+  group_by(parameter_id, prob_of_zero, shape_param, scale_param, num_railcars_per_composite, train_is_safe, target_safe_proportions) %>% 
+  reframe(total_trains = n(), 
+          num_pass = sum(trainload_pass),
+          num_fail = sum(!trainload_pass),
+          frac_pass = sum(trainload_pass)/n(),
+          frac_pass_moe = 1.96*sqrt(frac_pass*(1-frac_pass)/total_trains),
+          frac_pass_ci_lb = frac_pass - frac_pass_moe,
+          frac_pass_ci_ub = frac_pass + frac_pass_moe)
+
+# 1) Summarize consumer's risk across all combos:
+consumer_risk2 <- summary2.tb %>%
+  filter(train_is_safe == FALSE) %>%               # only truly-unsafe trains
+  group_by(
+    prob_of_zero,
+    shape_param,
+    scale_param,
+    num_railcars_per_composite,
+    target_safe_proportions
+  ) 
+
+# 2) Plot it:
+ggplot(consumer_risk2,
+       aes(
+         x = target_safe_proportions,
+         y = frac_pass,
+         color    = factor(num_railcars_per_composite),
+         linetype = factor(scale_param),
+         group    = interaction(num_railcars_per_composite, scale_param)
+       )) +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 1, alpha = 0.8) +
+  facet_grid(
+    prob_of_zero ~ shape_param,
+    labeller = label_both
+  ) +
+  scale_x_continuous(
+    breaks = c(0.9, 0.95, 0.99, 1),
+    labels = percent_format(accuracy = 1)
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    limits = c(0, 1)
+  ) +
+  labs(
+    x     = "Target Safe Proportion",
+    y     = "Consumer’s Risk\n(% “safe” samples when train truly unsafe)",
+    color = "Sample\nSize",
+    linetype = "Scale\nParam",
+    title = "Consumer’s Risk vs. Target Threshold\nacross All Parameter Combinations"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey95", color = NA),
+    panel.grid.minor  = element_blank()
+  )
