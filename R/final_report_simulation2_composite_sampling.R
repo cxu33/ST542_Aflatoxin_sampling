@@ -162,6 +162,10 @@ res2 <- res2 %>%
 res2 <- res2 %>% 
   mutate(scale_plot = factor(scale_plot, levels = paste0("scale: ",c(1,2,3,4,5,10,20))))
 
+# Add "num unsafe railcars" to res2 for each trainload
+res2  <- res2 %>% 
+  mutate(num_unsafe_railcars = 200*(1-train_true_safe_prop))
+
 # Calculate power, etc
 summary.tb <- res2 %>% 
   group_by(parameter_id, prob_of_zero, shape_param, scale_param, 
@@ -172,22 +176,6 @@ summary.tb <- res2 %>%
           num_fail = sum(!trainload_pass),
           frac_pass = sum(trainload_pass)/n())
 
-
-
-# See percent of safe trainloads accepted
-summary.tb %>% 
-  filter(train_is_safe) %>%  # selects safe trainloads
-  select(frac_pass) %>% 
-  summary
-# frac_pass
-# Min.   :1  
-# 1st Qu.:1  
-# Median :1  
-# Mean   :1  
-# 3rd Qu.:1  
-# Max.   :1
-
-# For every parameter combination, 100% of safe trainloads were accepted
 
 
 # Create figures ----------------------------------------------------------
@@ -245,12 +233,41 @@ plotdat %>%
   filter(abs(p0 - `p0.05`) > 0.05)
 # And for most of the differences, the 5% version has slightly higher type 1 error rates
 
-plotdat %>% 
-  filter(is.na(p0) | is.na(`p0.05`))
-# 8 occurences, all with scale = 1 or 2
-# I'm guessign this is just due to places where one sim had 1 or 2 unsafe trainloads, the other setting did not
-# so no real diffeeence here
 
+# check for NAs 
+plotdat %>% 
+  filter(is.na(p0) | is.na(`p0.05`)) %>% 
+  arrange(scale_param, shape_param)
+# 8 occurences, all with scale = 1 or 2
+
+# Get the counts of trains in each category
+add.dat <- summary.tb %>% 
+  filter(!train_is_safe) %>% 
+  pivot_wider(id_cols = c(shape_param, scale_param, num_railcars_per_composite), 
+              names_from = prob_of_zero, names_prefix  = "num_unsafe_trains_p", values_from = total_trains)
+add.dat <- add.dat %>% 
+  full_join(plotdat, by = c("shape_param","scale_param","num_railcars_per_composite"))
+
+# Check count of unsafe 
+add.dat %>% 
+  filter(is.na(p0) | is.na(`p0.05`)) %>% 
+  arrange(scale_param, shape_param)
+# shape_param scale_param num_railcars_per_composite num_unsafe_trains_p0 num_unsafe_trains_p0.05    p0 p0.05
+#         <dbl>       <dbl>                      <dbl>                <int>                   <int> <dbl> <dbl>
+# 1         3             1                          2                    1                      NA     1    NA
+# 2         4             1                          2                    1                      NA     1    NA
+# 3         4             1                         20                   NA                       1    NA     1
+# 4         4             1                         40                    1                      NA     1    NA
+# 5         0.5           2                          2                    1                      NA     1    NA
+# 6         0.5           2                          5                   NA                       3    NA     1
+# 7         0.5           2                         10                    3                      NA     1    NA
+# 8         0.5           2                         20                    1                      NA     1    NA
+# So in all 8 cases where the consumer's risk is NA for one of the 0% or 5% ZIP simulation, 
+# (but not NA for the other settings), there were only 1-3 unsafe trainloads simulated
+# for the setting had a non-NA estimate. Thus, I don't think that these cases
+# consistute a substantial difference in the consumer's risk for the 0% and 5% ZIP simulations,
+# since the presence of 0 vs 1-3 unsafe trainloads when the scale is low is probably just due to variability
+# in the random values drawn for the simulation.
 
 ## Fig 4: Consumer's risk at different combos ----------------------------------------------------------
 
@@ -280,9 +297,8 @@ ggsave(filename = "figs/Figure_4_consumers_risk_vs_num_railcars_per_composite_fa
 # Get data to plot
 plotdat <- res2 %>% 
   filter(trainload_pass == TRUE, scale_param > 1) %>% 
-  mutate(num_unsafe_railcars = 200*(1-train_true_safe_prop)) %>% 
-  group_by(shape_param, scale_param, scale_plot, prob_of_zero, num_railcars_per_composite) %>% 
-  mutate(avg_num_unsafe_railcars = mean(num_unsafe_railcars))
+  group_by(shape_param, scale_param, scale_plot, prob_of_zero, num_railcars_per_composite, parameter_id_sans_nrpc) %>% 
+  reframe(avg_num_unsafe_railcars = mean(num_unsafe_railcars))
 plotdat$shape <- as.factor(plotdat$shape_param)
 
 # facet by scale, color by shape
@@ -334,3 +350,60 @@ ggplot(example.dat, aes(x = ppb)) +
 
 ggsave(filename = "figs/Figure_6_example_trainload_dist_prob_0.05_shape_4_scale_facet.png", width = 6, height = 4)
 
+
+
+# Generating numbers for results ------------------------------------------
+
+## Number of unsafe vs safe trainloads ---------------------
+summary.tb %>% 
+  filter(scale_param %in% c(1)) %>% 
+  select(train_is_safe, total_trains) %>% 
+  arrange(total_trains)
+# ONly 4 cases have 1 unsafe trainload
+
+summary.tb %>% 
+  filter(scale_param %in% c(10,20)) %>% 
+  select(train_is_safe, total_trains) %>% 
+  reframe(unique(train_is_safe))
+# All FALSE
+
+
+## safe trainloads identified as safe ----------------------
+
+# See percent of safe trainloads accepted
+summary.tb %>% 
+  filter(train_is_safe) %>%  # selects safe trainloads
+  select(frac_pass) %>% 
+  summary
+# frac_pass
+# Min.   :1  
+# 1st Qu.:1  
+# Median :1  
+# Mean   :1  
+# 3rd Qu.:1  
+# Max.   :1
+
+# For every parameter combination, 100% of safe trainloads were accepted
+
+
+
+## Avg number of unsafe railcars when scale == 2 ----------------
+
+
+plotdat <- res2 %>% 
+  filter(trainload_pass == TRUE) %>% 
+  group_by(shape_param, scale_param, scale_plot, prob_of_zero, num_railcars_per_composite) %>% 
+  reframe(avg_num_unsafe_railcars = mean(num_unsafe_railcars))
+
+plotdat %>% 
+  filter(scale_param == 2, prob_of_zero == 0.05) %>% 
+  select(shape_param, scale_param, scale_plot, prob_of_zero, num_railcars_per_composite, avg_num_unsafe_railcars) %>% 
+  arrange(-avg_num_unsafe_railcars)
+#   shape_param scale_param scale_plot prob_of_zero num_railcars_per_composite avg_num_unsafe_railcars
+#         <dbl>       <dbl> <fct>             <dbl>                      <dbl>                   <dbl>
+# 1           4           2 scale: 2           0.05                          2                   2.00 
+# 2           4           2 scale: 2           0.05                         20                   1.99 
+# 3           4           2 scale: 2           0.05                         10                   1.98 
+# 4           4           2 scale: 2           0.05                          5                   1.97 
+# 5           4           2 scale: 2           0.05                         40                   1.88 
+# 6           3           2 scale: 2           0.05                          5                   0.574
